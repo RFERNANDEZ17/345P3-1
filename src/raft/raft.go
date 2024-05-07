@@ -70,9 +70,11 @@ type Raft struct {
 	// heartbeat stuff
 	heartbeatTimer int
 	heartbeatChan  chan AppendEntriesArgs
+	stopCh         chan bool
 
-	// election timer stuff
+	// election stuff
 	electionTimer int
+	chWinElection chan bool
 }
 
 type Log struct {
@@ -215,7 +217,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesResul
 	// Your code here (3, 4).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	fmt.Printf("Leader %d sending heartbeats; Term: %d\n", rf.me, rf.currentTerm)
+	//fmt.Printf("Leader %d sending heartbeats; Term: %d\n", rf.me, rf.currentTerm)
 
 	if (args.Term < rf.currentTerm) || (args.PrevLogIndex > len(rf.log)) {
 		reply.Term = rf.currentTerm
@@ -277,7 +279,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, returns *AppendEntriesResults) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, returns)
-	fmt.Printf("Follower %d received heartbeat from Leader %d; Term: %d\n", rf.me, args.LeaderId, args.Term)
+	//fmt.Printf("Follower %d received heartbeat from Leader %d; Term: %d\n", server, args.LeaderId, args.Term)
 	return ok
 }
 
@@ -329,8 +331,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (3, 4).
 	rf.heartbeatChan = make(chan AppendEntriesArgs)
+	rf.chWinElection = make(chan bool, 1)
+	rf.electionTimeGenerator()
+	rf.heartBeatTimeGenerator()
 
-	rf.startInit()
+	go func() {
+		rf.startInit()
+	}()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -340,86 +347,78 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 // check state conditions
 func (rf *Raft) startInit() {
-	rf.heartBeatTimeGenerator()
-	rf.electionTimeGenerator()
+	rf.stopped = false
 
 	for !rf.stopped {
 		switch rf.state {
 		case 0:
 			// follower
 			select {
-			case <-time.After(time.Duration(rf.heartbeatTimer) * time.Millisecond):
+
+			// leader failure
+			case <-time.After(time.Duration(rf.electionTimer) * time.Millisecond):
 				// heartbeat timeout case
-				fmt.Printf("F%v hasn't received heartbeat. Stepping up to candidate C%v...", rf.me, rf.me)
+				fmt.Printf("F%v hasn't received heartbeat. Stepping up to candidate C%v...\n", rf.me, rf.me)
 				rf.mu.Lock()
 				rf.state = 1
 				rf.mu.Unlock()
 
 			// recieve a heartbeat
-			case <-rf.heartbeatChan:
-				fmt.Printf("F%v has received heartbeat. Staying as follower...", rf.me)
-				rf.mu.Lock()
-				rf.currentTerm += 1
-				rf.mu.Unlock()
+			case heartbeat := <-rf.heartbeatChan:
+				fmt.Printf("F%v has received heartbeat. Staying as follower...\n", rf.me)
+				rf.electionTimeGenerator()
+				if heartbeat.Term > rf.currentTerm {
+					rf.mu.Lock()
+					rf.currentTerm += 1
+					rf.mu.Unlock()
+				}
 			}
-		case 1: // DONE
+		case 1:
 			// candidate
-			fmt.Printf("C%v hasn't received heartbeat. Starting initial election C%v...", rf.me, rf.me)
+			fmt.Printf("C%v hasn't received heartbeat. Starting initial election C%v...\n", rf.me, rf.me)
+
+			// start elections
 			rf.elections()
 
 			select {
 			case <-time.After(time.Duration(rf.electionTimer) * time.Millisecond):
-				fmt.Printf("C%v election has timed out.\n", rf.me)
-				rf.elections()
-			case <-rf.heartbeatChan:
-				fmt.Printf("C%v has received heartbeat. Stepping down to follower F%v...", rf.me, rf.me)
-				rf.mu.Lock()
-				rf.state = 0
-				rf.mu.Unlock()
-			}
+				fmt.Printf("C%v election has timed out. Start new election.\n", rf.me)
 
-		case 2: // DONE
-			// leader
-			fmt.Printf("L%v is sending out heartbeats. Staying the leader L%v...", rf.me, rf.me)
-			var lli int // need to make sure we don't overflow
-			var llt int
-			if (len(rf.log) - 1) < 0 {
-				lli = 0
-				llt = 0
-			} else {
-				lli = len(rf.log) - 1
-				llt = rf.log[len(rf.log)-1].Term
-			}
-
-			// Send heartbeats to all servers
-			entryArgs := AppendEntriesArgs{
-				Term:         rf.currentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: lli,
-				PrevLogTerm:  llt,
-				Entries:      nil,
-				LeaderCommit: rf.commitIndex,
-			}
-
-			for index := range rf.peers {
-				if index != rf.me {
-					go func(server int) {
-						reply := AppendEntriesResults{}
-						rf.sendAppendEntries(server, &entryArgs, &reply)
-					}(index)
+			case heartbeat := <-rf.heartbeatChan:
+				if heartbeat.Term > rf.currentTerm {
+					fmt.Printf("C%v has received heartbeat. Stepping down to follower F%v...\n", rf.me, rf.me)
+					rf.mu.Lock()
+					rf.state = 0
+					rf.mu.Unlock()
 				}
 
+			case win := <-rf.chWinElection:
+				if win {
+					rf.mu.Lock()
+					rf.state = 2
+					rf.mu.Unlock()
+					fmt.Printf("Candidate %d won the election and is now the Leader.\n", rf.me)
+				}
 			}
+
+		case 2:
+			// leader
+
+			rf.heartBeatTimeGenerator()
+			rf.sendHeartBeats()
+
 		}
 	}
 }
 
 func (rf *Raft) heartBeatTimeGenerator() {
+	rf.mu.Lock()
 	rf.heartbeatTimer = rand.Intn(100) + 100
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) electionTimeGenerator() {
-	rf.electionTimer = rand.Intn(150) + 150
+	rf.electionTimer = rand.Intn(2000) + 2000
 }
 
 func (rf *Raft) elections() {
@@ -427,6 +426,7 @@ func (rf *Raft) elections() {
 	fmt.Printf("Node %d starting election for term %d\n", rf.me, rf.currentTerm+1)
 	rf.currentTerm += 1
 	rf.votedFor = rf.me
+	rf.electionTimeGenerator()
 	rf.mu.Unlock()
 
 	// make the channel wait
@@ -479,25 +479,46 @@ func (rf *Raft) elections() {
 		}
 	}
 	fmt.Printf("Node %d received %d votes\n", rf.me, votes)
-	rf.mu.Lock()
 
 	// if winner then setup new leader, else do nothing
-	if votes >= len(rf.peers)/2 {
+	if votes > len(rf.peers)/2 {
 		fmt.Printf("Node %d becomes leader\n", rf.me)
-		rf.newLeader()
+		//rf.newLeader()
+		rf.mu.Lock()
+		rf.state = 2
+		rf.chWinElection <- true
+		rf.mu.Unlock()
+
 	} else {
 		fmt.Printf("Node %d remains candidate\n", rf.me)
-		rf.state = 0
-		rf.mu.Unlock()
 	}
 
 }
 
-func (rf *Raft) newLeader() {
-	// all we do is send out initial empty heartbeats
-	rf.state = 2
-	rf.mu.Unlock()
+func (rf *Raft) sendHeartBeats() {
+	ticker := time.NewTicker(time.Duration(rf.heartbeatTimer) * time.Millisecond)
+	defer ticker.Stop()
 
+	for {
+		select {
+		case <-ticker.C:
+			if rf.state != 2 {
+				fmt.Printf("L%v NOT THE LEADER", rf.me)
+				return
+			}
+			rf.broadcastHeartbeat()
+		case <-rf.stopCh:
+			fmt.Printf("stopping")
+			return
+		}
+	}
+}
+
+func (rf *Raft) broadcastHeartbeat() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	fmt.Printf("L%v is sending out heartbeats. Staying the leader L%v...\n", rf.me, rf.me)
 	var lli int // need to make sure we don't overflow
 	var llt int
 	if (len(rf.log) - 1) < 0 {
@@ -508,20 +529,57 @@ func (rf *Raft) newLeader() {
 		llt = rf.log[len(rf.log)-1].Term
 	}
 
+	// Send heartbeats to all servers
+	entryArgs := AppendEntriesArgs{
+		Term:         rf.currentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: lli,
+		PrevLogTerm:  llt,
+		Entries:      nil,
+		LeaderCommit: rf.commitIndex,
+	}
+
 	for index := range rf.peers {
 		if index != rf.me {
 			go func(server int) {
-				args := AppendEntriesArgs{
-					Term:         rf.currentTerm,
-					LeaderId:     rf.me,
-					PrevLogIndex: lli,
-					PrevLogTerm:  llt,
-					Entries:      nil, //empty heartbeat
-					LeaderCommit: rf.commitIndex,
-				}
 				reply := AppendEntriesResults{}
-				rf.sendAppendEntries(index, &args, &reply)
+				rf.sendAppendEntries(server, &entryArgs, &reply)
 			}(index)
 		}
+
 	}
+
 }
+
+// func (rf *Raft) newLeader() {
+// 	// all we do is send out initial empty heartbeats
+// 	rf.state = 2
+// 	rf.mu.Unlock()
+
+// 	var lli int // need to make sure we don't overflow
+// 	var llt int
+// 	if (len(rf.log) - 1) < 0 {
+// 		lli = 0
+// 		llt = 0
+// 	} else {
+// 		lli = len(rf.log) - 1
+// 		llt = rf.log[len(rf.log)-1].Term
+// 	}
+
+// 	for index := range rf.peers {
+// 		if index != rf.me {
+// 			go func(server int) {
+// 				args := AppendEntriesArgs{
+// 					Term:         rf.currentTerm,
+// 					LeaderId:     rf.me,
+// 					PrevLogIndex: lli,
+// 					PrevLogTerm:  llt,
+// 					Entries:      nil, //empty heartbeat
+// 					LeaderCommit: rf.commitIndex,
+// 				}
+// 				reply := AppendEntriesResults{}
+// 				rf.sendAppendEntries(server, &args, &reply)
+// 			}(index)
+// 		}
+// 	}
+// }
