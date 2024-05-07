@@ -60,7 +60,6 @@ func TestReElection3(t *testing.T) {
 	fmt.Printf("first check pass!!!!!!!!!!!!!!!!!!!!!!!!!\n")
 
 	// if the leader disconnects, a new one should be elected.
-	fmt.Printf("DISCONNECTED A LEADER\n")
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
 	fmt.Printf("second check pass!!!!!!!!!!!!!!!!!!!!!!!!!\n")

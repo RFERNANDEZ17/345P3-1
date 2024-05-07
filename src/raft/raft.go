@@ -204,6 +204,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
+		rf.electionTimeGenerator()
 		return
 	} else {
 		reply.Term = rf.currentTerm
@@ -217,12 +218,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesResul
 	// Your code here (3, 4).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	//fmt.Printf("Leader %d sending heartbeats; Term: %d\n", rf.me, rf.currentTerm)
+	//fmt.Printf("Follower %d receiving heartbeats; Term: %d\n", rf.me, rf.currentTerm)
 
 	if (args.Term < rf.currentTerm) || (args.PrevLogIndex > len(rf.log)) {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
+	}
+
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.state = 0
 	}
 
 	for index, entry := range args.Entries {
@@ -332,6 +339,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (3, 4).
 	rf.heartbeatChan = make(chan AppendEntriesArgs)
 	rf.chWinElection = make(chan bool, 1)
+	rf.stopCh = make(chan bool)
 	rf.electionTimeGenerator()
 	rf.heartBeatTimeGenerator()
 
@@ -385,8 +393,8 @@ func (rf *Raft) startInit() {
 				fmt.Printf("C%v election has timed out. Start new election.\n", rf.me)
 
 			case heartbeat := <-rf.heartbeatChan:
-				if heartbeat.Term > rf.currentTerm {
-					fmt.Printf("C%v has received heartbeat. Stepping down to follower F%v...\n", rf.me, rf.me)
+				fmt.Printf("C%v has received heartbeat. Stepping down to follower F%v...\n", rf.me, rf.me)
+				if heartbeat.Term > -1 { //rf.currentTerm {
 					rf.mu.Lock()
 					rf.state = 0
 					rf.mu.Unlock()
@@ -398,6 +406,7 @@ func (rf *Raft) startInit() {
 					rf.state = 2
 					rf.mu.Unlock()
 					fmt.Printf("Candidate %d won the election and is now the Leader.\n", rf.me)
+					//go rf.sendHeartBeats()
 				}
 			}
 
@@ -418,7 +427,7 @@ func (rf *Raft) heartBeatTimeGenerator() {
 }
 
 func (rf *Raft) electionTimeGenerator() {
-	rf.electionTimer = rand.Intn(2000) + 2000
+	rf.electionTimer = rand.Intn(1000) + 1000
 }
 
 func (rf *Raft) elections() {
@@ -502,13 +511,16 @@ func (rf *Raft) sendHeartBeats() {
 	for {
 		select {
 		case <-ticker.C:
+			rf.mu.Lock()
 			if rf.state != 2 {
 				fmt.Printf("L%v NOT THE LEADER", rf.me)
+				rf.mu.Unlock()
 				return
 			}
+			rf.mu.Unlock()
 			rf.broadcastHeartbeat()
 		case <-rf.stopCh:
-			fmt.Printf("stopping")
+			fmt.Printf("Stopping heartbeat routine for L%v...\n", rf.me)
 			return
 		}
 	}
@@ -516,6 +528,10 @@ func (rf *Raft) sendHeartBeats() {
 
 func (rf *Raft) broadcastHeartbeat() {
 	rf.mu.Lock()
+	if rf.state != 2 {
+		rf.mu.Unlock()
+		return
+	}
 	defer rf.mu.Unlock()
 
 	fmt.Printf("L%v is sending out heartbeats. Staying the leader L%v...\n", rf.me, rf.me)
@@ -550,36 +566,3 @@ func (rf *Raft) broadcastHeartbeat() {
 	}
 
 }
-
-// func (rf *Raft) newLeader() {
-// 	// all we do is send out initial empty heartbeats
-// 	rf.state = 2
-// 	rf.mu.Unlock()
-
-// 	var lli int // need to make sure we don't overflow
-// 	var llt int
-// 	if (len(rf.log) - 1) < 0 {
-// 		lli = 0
-// 		llt = 0
-// 	} else {
-// 		lli = len(rf.log) - 1
-// 		llt = rf.log[len(rf.log)-1].Term
-// 	}
-
-// 	for index := range rf.peers {
-// 		if index != rf.me {
-// 			go func(server int) {
-// 				args := AppendEntriesArgs{
-// 					Term:         rf.currentTerm,
-// 					LeaderId:     rf.me,
-// 					PrevLogIndex: lli,
-// 					PrevLogTerm:  llt,
-// 					Entries:      nil, //empty heartbeat
-// 					LeaderCommit: rf.commitIndex,
-// 				}
-// 				reply := AppendEntriesResults{}
-// 				rf.sendAppendEntries(server, &args, &reply)
-// 			}(index)
-// 		}
-// 	}
-// }
