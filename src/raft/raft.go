@@ -530,6 +530,7 @@ func (rf *Raft) elections() {
 	// 	close(voteChannels)
 	// }()
 
+	// PROTECTED, ALWAYS UPDATING VOTES WHILE STILL SENNDING OUT VOTE REQUESTS
 	go func() {
 		for vote := range voteChannels {
 			if vote {
@@ -539,6 +540,7 @@ func (rf *Raft) elections() {
 	}()
 
 	// if winner then setup new leader, else do nothing
+	// THIS RUNS FOREVER IF DONT GET OVER HALF VOTES
 	go func() {
 		for {
 			if atomic.LoadInt32(&votes) > int32(len(rf.peers)/2) {
