@@ -339,6 +339,7 @@ func (rf *Raft) Kill() {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
+	rf.mu.Lock()
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
@@ -348,6 +349,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.heartbeatChan = make(chan AppendEntriesArgs)
 	rf.chWinElection = make(chan bool, 1)
 	rf.stopCh = make(chan bool)
+	rf.mu.Unlock()
 	rf.electionTimeGenerator()
 	rf.heartBeatTimeGenerator()
 
@@ -363,7 +365,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 // check state conditions
 func (rf *Raft) startInit() {
+	rf.mu.Lock()
 	rf.stopped = false
+	rf.mu.Unlock()
 
 	for !rf.stopped {
 		switch rf.state {
@@ -486,16 +490,15 @@ func (rf *Raft) elections() {
 
 	rf.electionTimeGenerator()
 
-	// make the channel wait
-	// var waitTime sync.WaitGroup
+	rf.electionTimeGenerator()
+
 	votes := int32(1) // start at 1 because voted for self
 	voteChannels := make(chan bool, len(rf.peers)-1)
 
 	for index := range rf.peers {
 		if index != rf.me {
-			// waitTime.Add(1)
+
 			go func(server int) {
-				// defer waitTime.Done()
 
 				// making sure we don't overflow the log
 				var lli int
@@ -525,11 +528,6 @@ func (rf *Raft) elections() {
 		}
 	}
 
-	// go func() {
-	// 	waitTime.Wait()
-	// 	close(voteChannels)
-	// }()
-
 	// PROTECTED, ALWAYS UPDATING VOTES WHILE STILL SENNDING OUT VOTE REQUESTS
 	go func() {
 		for vote := range voteChannels {
@@ -539,17 +537,21 @@ func (rf *Raft) elections() {
 		}
 	}()
 
-	// if winner then setup new leader, else do nothing
-	// THIS RUNS FOREVER IF DONT GET OVER HALF VOTES
+	// if winner then setup new leader, else do nothing -- set a max timeout so it doesn't run forever
 	go func() {
+		maxTimeOut := time.After(time.Duration(500) * time.Millisecond)
 		for {
-			if atomic.LoadInt32(&votes) > int32(len(rf.peers)/2) {
-				fmt.Printf("Node %d received %d votes\n", rf.me, votes)
-				fmt.Printf("Node %d becomes leader\n", rf.me)
-				go func() { rf.chWinElection <- true }() //do this in loop above
-				break
-			} else {
-				//fmt.Printf("nope\n")
+			select {
+			case <-maxTimeOut:
+				fmt.Printf("Node %d timed out\n", rf.me)
+				return
+			default:
+				if atomic.LoadInt32(&votes) > int32(len(rf.peers)/2) {
+					fmt.Printf("Node %d received %d votes\n", rf.me, votes)
+					fmt.Printf("Node %d becomes leader\n", rf.me)
+					go func() { rf.chWinElection <- true }() //do this in loop above
+					return
+				}
 			}
 		}
 	}()
