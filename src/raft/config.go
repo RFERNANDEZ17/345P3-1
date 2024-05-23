@@ -181,6 +181,7 @@ func (cfg *config) start1(i int) {
 					}
 				}
 				_, prevok := cfg.logs[i][m.CommandIndex-1]
+				fmt.Printf("ADDEDTHE COMMITTED COMMAND %v!!!!!!!!!!!!!!!!!!\n", v)
 				cfg.logs[i][m.CommandIndex] = v
 				if m.CommandIndex > cfg.maxIndex {
 					cfg.maxIndex = m.CommandIndex
@@ -369,6 +370,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 		cmd1, ok := cfg.logs[i][index]
 		cfg.mu.Unlock()
 
+		fmt.Printf("COMMANNNDDD %v\n", cmd1)
 		if ok {
 			if count > 0 && cmd != cmd1 {
 				cfg.t.Fatalf("committed values do not match: index %v, %v, %v\n",
@@ -453,7 +455,9 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+				fmt.Println(nd)
 				if nd > 0 && nd >= expectedServers {
+					fmt.Printf("ENTERED!!!!!!!\n")
 					// committed
 					if cmd2, ok := cmd1.(int); ok && cmd2 == cmd {
 						// and it was the command we submitted.
@@ -462,7 +466,10 @@ func (cfg *config) one(cmd int, expectedServers int, retry bool) int {
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
+			_, cmd1 := cfg.nCommitted(index)
 			if retry == false {
+				fmt.Println(cmd1.(int))
+				fmt.Println(cmd)
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
 		} else {
